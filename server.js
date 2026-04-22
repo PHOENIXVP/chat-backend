@@ -8,10 +8,13 @@ app.use(cors());
 
 const server = http.createServer(app);
 
+// ✅ Important for Render + stability
 const io = new Server(server, {
   cors: {
     origin: "*",
+    methods: ["GET", "POST"],
   },
+  transports: ["websocket", "polling"],
 });
 
 // ===============================
@@ -22,7 +25,7 @@ const randomQueue = []; // waiting users
 const activeRooms = {}; // roomId -> [socketIds]
 
 // ===============================
-// 🟢 Health Check Route
+// 🟢 Health Check
 // ===============================
 app.get("/", (req, res) => {
   res.send("Server is running 🚀");
@@ -38,6 +41,8 @@ io.on("connection", (socket) => {
   // 👤 JOIN USER
   // ===============================
   socket.on("join", (username) => {
+    if (!username) return;
+
     users[socket.id] = { username };
 
     socket.join("global");
@@ -52,8 +57,7 @@ io.on("connection", (socket) => {
   // ===============================
   socket.on("sendGlobalMessage", (message) => {
     const user = users[socket.id];
-
-    if (!user) return;
+    if (!user || !message) return;
 
     io.to("global").emit("receiveGlobalMessage", {
       user: user.username,
@@ -63,12 +67,12 @@ io.on("connection", (socket) => {
   });
 
   // ===============================
-  // 💬 PRIVATE MESSAGE (DM)
+  // 💬 PRIVATE MESSAGE
   // ===============================
   socket.on("privateMessage", ({ to, message }) => {
     const user = users[socket.id];
 
-    if (!user || !users[to]) return;
+    if (!user || !users[to] || !message) return;
 
     const payload = {
       from: socket.id,
@@ -80,7 +84,7 @@ io.on("connection", (socket) => {
     // Send to receiver
     io.to(to).emit("privateMessage", payload);
 
-    // Send back to sender (for UI sync)
+    // Send back to sender
     socket.emit("privateMessage", payload);
   });
 
@@ -90,14 +94,22 @@ io.on("connection", (socket) => {
   socket.on("findPartner", () => {
     console.log("🔍 Finding partner for", socket.id);
 
+    // ❗ Prevent duplicate queue entries
+    if (randomQueue.includes(socket.id)) return;
+
     // If someone waiting → match
     if (randomQueue.length > 0) {
       const partnerId = randomQueue.shift();
 
+      // ❗ Skip if partner disconnected
+      if (!io.sockets.sockets.get(partnerId)) {
+        return;
+      }
+
       const roomId = `room-${socket.id}-${partnerId}`;
 
       socket.join(roomId);
-      io.sockets.sockets.get(partnerId)?.join(roomId);
+      io.sockets.sockets.get(partnerId).join(roomId);
 
       activeRooms[roomId] = [socket.id, partnerId];
 
@@ -108,7 +120,6 @@ io.on("connection", (socket) => {
         users: activeRooms[roomId],
       });
     } else {
-      // Add to queue
       randomQueue.push(socket.id);
       console.log("⏳ Added to queue:", socket.id);
     }
@@ -119,7 +130,7 @@ io.on("connection", (socket) => {
   // ===============================
   socket.on("randomMessage", ({ roomId, message }) => {
     const user = users[socket.id];
-    if (!user) return;
+    if (!user || !roomId || !message) return;
 
     socket.to(roomId).emit("randomMessage", {
       user: user.username,
@@ -132,15 +143,18 @@ io.on("connection", (socket) => {
   // ❌ LEAVE RANDOM CHAT
   // ===============================
   socket.on("leaveRandom", (roomId) => {
+    if (!activeRooms[roomId]) return;
+
+    const roomUsers = activeRooms[roomId];
+    const partner = roomUsers.find((id) => id !== socket.id);
+
     socket.leave(roomId);
 
-    if (activeRooms[roomId]) {
-      const partner = activeRooms[roomId].find((id) => id !== socket.id);
-
+    if (partner) {
       io.to(partner).emit("partnerLeft");
-
-      delete activeRooms[roomId];
     }
+
+    delete activeRooms[roomId];
   });
 
   // ===============================
@@ -154,16 +168,20 @@ io.on("connection", (socket) => {
 
     // Remove from queue
     const index = randomQueue.indexOf(socket.id);
-    if (index !== -1) randomQueue.splice(index, 1);
+    if (index !== -1) {
+      randomQueue.splice(index, 1);
+    }
 
-    // Remove from rooms
+    // Handle active rooms
     for (let roomId in activeRooms) {
       if (activeRooms[roomId].includes(socket.id)) {
         const partner = activeRooms[roomId].find(
           (id) => id !== socket.id
         );
 
-        io.to(partner).emit("partnerLeft");
+        if (partner) {
+          io.to(partner).emit("partnerLeft");
+        }
 
         delete activeRooms[roomId];
       }
@@ -174,9 +192,9 @@ io.on("connection", (socket) => {
 });
 
 // ===============================
-// 🚀 START SERVER
+// 🚀 START SERVER (Render-safe)
 // ===============================
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 10000;
 
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
