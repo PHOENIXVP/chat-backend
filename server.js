@@ -8,7 +8,6 @@ app.use(cors());
 
 const server = http.createServer(app);
 
-// ✅ Important for Render + stability
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -18,46 +17,47 @@ const io = new Server(server, {
 });
 
 // ===============================
-// 🔥 In-memory storage (NO DB)
+// MEMORY
 // ===============================
-const users = {}; // socketId -> { username }
-const randomQueue = []; // waiting users
-const activeRooms = {}; // roomId -> [socketIds]
+const users = {};
+const randomQueue = [];
+const activeRooms = {};
 
-// ===============================
-// 🟢 Health Check
 // ===============================
 app.get("/", (req, res) => {
   res.send("Server is running 🚀");
 });
 
 // ===============================
-// 🔌 Socket Connection
-// ===============================
 io.on("connection", (socket) => {
-  console.log("✅ Connected:", socket.id);
+  console.log("🟢 CONNECTED:", socket.id);
 
   // ===============================
-  // 👤 JOIN USER
+  // JOIN
   // ===============================
   socket.on("join", (username) => {
     if (!username) return;
 
     users[socket.id] = { username };
-
     socket.join("global");
 
-    console.log(`👤 ${username} joined`);
+    console.log(`👤 JOINED: ${username} (${socket.id})`);
+    console.log("👥 ONLINE USERS:", Object.keys(users));
 
     io.emit("onlineUsers", users);
   });
 
   // ===============================
-  // 🌍 GLOBAL CHAT
+  // GLOBAL MESSAGE
   // ===============================
   socket.on("sendGlobalMessage", (message) => {
     const user = users[socket.id];
-    if (!user || !message) return;
+    if (!user) return;
+
+    console.log("🌍 GLOBAL MSG:", {
+      from: user.username,
+      message,
+    });
 
     io.to("global").emit("receiveGlobalMessage", {
       user: user.username,
@@ -67,53 +67,37 @@ io.on("connection", (socket) => {
   });
 
   // ===============================
-  // 💬 PRIVATE MESSAGE
-  // ===============================
-  socket.on("privateMessage", ({ to, message }) => {
-    const user = users[socket.id];
-
-    if (!user || !users[to] || !message) return;
-
-    const payload = {
-      from: socket.id,
-      user: user.username,
-      message,
-      time: new Date(),
-    };
-
-    // Send to receiver
-    io.to(to).emit("privateMessage", payload);
-
-    // Send back to sender
-    socket.emit("privateMessage", payload);
-  });
-
-  // ===============================
-  // 🎲 RANDOM MATCH
+  // FIND PARTNER
   // ===============================
   socket.on("findPartner", () => {
-    console.log("🔍 Finding partner for", socket.id);
+    console.log("🔍 FIND PARTNER:", socket.id);
 
-    // ❗ Prevent duplicate queue entries
-    if (randomQueue.includes(socket.id)) return;
+    if (randomQueue.includes(socket.id)) {
+      console.log("⛔ Already in queue:", socket.id);
+      return;
+    }
 
-    // If someone waiting → match
     if (randomQueue.length > 0) {
       const partnerId = randomQueue.shift();
 
-      // ❗ Skip if partner disconnected
-      if (!io.sockets.sockets.get(partnerId)) {
+      console.log("🤝 TRY MATCH:", socket.id, "WITH", partnerId);
+
+      const partnerSocket = io.sockets.sockets.get(partnerId);
+
+      if (!partnerSocket) {
+        console.log("❌ Partner disconnected:", partnerId);
         return;
       }
 
       const roomId = `room-${socket.id}-${partnerId}`;
 
       socket.join(roomId);
-      io.sockets.sockets.get(partnerId).join(roomId);
+      partnerSocket.join(roomId);
 
       activeRooms[roomId] = [socket.id, partnerId];
 
-      console.log("🎉 Matched:", roomId);
+      console.log("🎉 MATCHED ROOM:", roomId);
+      console.log("🏠 ROOM USERS:", activeRooms[roomId]);
 
       io.to(roomId).emit("matched", {
         roomId,
@@ -121,28 +105,46 @@ io.on("connection", (socket) => {
       });
     } else {
       randomQueue.push(socket.id);
-      console.log("⏳ Added to queue:", socket.id);
+      console.log("⏳ ADDED TO QUEUE:", socket.id);
+      console.log("📦 QUEUE SIZE:", randomQueue.length);
     }
   });
 
   // ===============================
-  // 🎲 RANDOM CHAT MESSAGE
+  // RANDOM MESSAGE
   // ===============================
   socket.on("randomMessage", ({ roomId, message }) => {
     const user = users[socket.id];
-    if (!user || !roomId || !message) return;
 
-    socket.to(roomId).emit("randomMessage", {
+    console.log("💬 RANDOM MESSAGE EVENT:");
+    console.log("   FROM:", socket.id);
+    console.log("   USER:", user?.username);
+    console.log("   ROOM:", roomId);
+    console.log("   MESSAGE:", message);
+
+    if (!user || !roomId || !message) {
+      console.log("❌ INVALID MESSAGE PAYLOAD");
+      return;
+    }
+
+    const payload = {
       user: user.username,
       message,
       time: new Date(),
-    });
+    };
+
+    console.log("📤 SENDING TO ROOM:", roomId);
+    console.log("📨 PAYLOAD:", payload);
+
+    socket.to(roomId).emit("randomMessage", payload);
   });
 
   // ===============================
-  // ❌ LEAVE RANDOM CHAT
+  // LEAVE
   // ===============================
   socket.on("leaveRandom", (roomId) => {
+    console.log("🚪 LEAVE ROOM:", roomId);
+
     if (!activeRooms[roomId]) return;
 
     const roomUsers = activeRooms[roomId];
@@ -151,6 +153,7 @@ io.on("connection", (socket) => {
     socket.leave(roomId);
 
     if (partner) {
+      console.log("📢 NOTIFY PARTNER LEFT:", partner);
       io.to(partner).emit("partnerLeft");
     }
 
@@ -158,26 +161,23 @@ io.on("connection", (socket) => {
   });
 
   // ===============================
-  // 🔌 DISCONNECT
+  // DISCONNECT
   // ===============================
   socket.on("disconnect", () => {
-    console.log("❌ Disconnected:", socket.id);
+    console.log("🔴 DISCONNECTED:", socket.id);
 
-    // Remove user
     delete users[socket.id];
 
-    // Remove from queue
     const index = randomQueue.indexOf(socket.id);
-    if (index !== -1) {
-      randomQueue.splice(index, 1);
-    }
+    if (index !== -1) randomQueue.splice(index, 1);
 
-    // Handle active rooms
     for (let roomId in activeRooms) {
       if (activeRooms[roomId].includes(socket.id)) {
         const partner = activeRooms[roomId].find(
           (id) => id !== socket.id
         );
+
+        console.log("❌ CLEANING ROOM:", roomId);
 
         if (partner) {
           io.to(partner).emit("partnerLeft");
@@ -187,12 +187,10 @@ io.on("connection", (socket) => {
       }
     }
 
-    io.emit("onlineUsers", users);
+    console.log("👥 ONLINE USERS AFTER DROP:", Object.keys(users));
   });
 });
 
-// ===============================
-// 🚀 START SERVER (Render-safe)
 // ===============================
 const PORT = process.env.PORT || 10000;
 
